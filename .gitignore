@@ -1,0 +1,21 @@
+# Entornos virtuales
+venv/
+*.venv/
+env/
+.env
+
+# Archivos de configuración sensibles
+.streamlit/secrets.toml  # ¡NUNCA subas tus secretos!
+frontend/config/.env     # ¡NUNCA subas tu archivo .env!
+
+# Archivos compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de IDE y sistema operativo
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

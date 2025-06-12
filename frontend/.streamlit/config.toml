@@ -1,0 +1,12 @@
+[client]
+showSidebarNavigation = false
+
+
+[server]
+page_icon = ":chart_with_upwards_trend:"
+layout = "wide"
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false

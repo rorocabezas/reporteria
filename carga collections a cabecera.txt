@@ -1,0 +1,16 @@
+# CARGA DE COLLECTIOS A CABECERA
+SELECT 
+added_date AS date,
+branch_office_id,
+SUM(cash_net_amount) as cash_amount,
+SUM(card_net_amount) as card_amount,
+SUM(0) as subscribers,
+SUM(total_tickets) as ticket_number 
+FROM collections
+WHERE
+	DAY(added_date) < (DAY(CURDATE())) AND
+	MONTH(added_date)  = ((MONTH(curdate()))) AND
+	YEAR(added_date)  = YEAR(curdate())
+GROUP BY 
+added_date,
+branch_office_id
