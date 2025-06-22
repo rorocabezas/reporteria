@@ -1,21 +1,76 @@
-# Entornos virtuales
-venv/
-*.venv/
-env/
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
 .env
+.venv
+env/
+venv/
+ENV/
+env.bak
+venv.bak
+
+# Streamlit
+.streamlit/
+
+# IDE settings
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 # Archivos de configuración sensibles
-.streamlit/secrets.toml  # ¡NUNCA subas tus secretos!
-frontend/config/.env     # ¡NUNCA subas tu archivo .env!
-
-# Archivos compilados de Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Archivos de IDE y sistema operativo
-.vscode/
-.idea/
-*.DS_Store
-Thumbs.db
+# Asegúrate de que tu archivo .env real esté listado aquí si contiene claves
+config/.env 

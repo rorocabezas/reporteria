@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # pages/dtes.py
 import streamlit as st
 import pandas as pd

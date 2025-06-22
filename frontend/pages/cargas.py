@@ -1,4 +1,5 @@
-# pages/cargas_diarias.py
+# -*- coding: utf-8 -*-
+# pages/cargas.py
 import streamlit as st
 import pandas as pd
 import sys

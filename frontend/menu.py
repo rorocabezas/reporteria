@@ -30,6 +30,8 @@ def generarMenu():
                 st.page_link("pages/informe.py", label="Informe", icon="📅")
                 st.page_link("pages/asistencia.py", label="Asistencia", icon="🕒")
                 st.page_link("pages/inasistencia.py", label="Inasistencia", icon="🕒")
+                st.page_link("pages/planificaciones.py", label="Malla Horaria", icon="📅")
+                st.page_link("pages/proyeccion.py", label="Proyeccion", icon="📅")
                 st.markdown("---")
                 # Botón para cerrar la sesión
                 btnSalir = st.button("Salir")

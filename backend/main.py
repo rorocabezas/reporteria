@@ -4,7 +4,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
 from backend.database import get_connection, close_connection, create_cursor
 import bcrypt
-from datetime import datetime
+from datetime import datetime, date, timedelta
+from typing import List
+
 
 app = FastAPI()
 security = HTTPBasic()
@@ -627,3 +629,243 @@ def get_inasistencias(
     finally:
         if cnx:
             close_connection(cnx)
+
+@app.get("/asistencia_turnos")
+def get_asistencia_turnos():
+    """
+    Obtiene todos los registros de la tabla ASISTENCIA_TURNOS.
+    """
+    cnx = get_connection('default') 
+    if not cnx:
+        raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
+
+    try:
+        cursor = create_cursor(cnx)
+        
+        query = "SELECT * FROM ASISTENCIA_TURNOS"
+        
+        cursor.execute(query)
+        
+        resultados = cursor.fetchall()
+        
+        # Si no hay resultados, no es un error, simplemente devuelve una lista vacía.
+        if not resultados:
+            return {"columns": [], "data": []}
+            
+        columnas = [desc[0] for desc in cursor.description]
+        
+        return {"columns": columnas, "data": resultados}
+
+    except Exception as e:
+        # Captura cualquier otro error durante la ejecución de la consulta
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+    finally:
+        if cnx:
+            close_connection(cnx)
+            
+            
+@app.get("/trabajadores")
+def get_trabajadores():
+    """
+    Obtiene los registros de trabajadores con información adicional de branch_offices y users.
+    """
+    cnx = get_connection('default')
+    if not cnx:
+        raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
+
+    try:
+        cursor = create_cursor(cnx)
+
+        query = """
+        SELECT
+            ASISTENCIA_TRABAJADOR.rut, 
+            ASISTENCIA_TRABAJADOR.trabajador as Trabajador, 
+            ASISTENCIA_TRABAJADOR.email, 
+            ASISTENCIA_TRABAJADOR.especialidad, 
+            ASISTENCIA_TRABAJADOR.horas, 
+            ASISTENCIA_TRABAJADOR.branch_office_id, 
+            branch_offices.branch_office as Sucursal, 
+            users.full_name as Supervisor
+        FROM
+            ASISTENCIA_TRABAJADOR
+            LEFT JOIN
+            branch_offices
+            ON 
+            ASISTENCIA_TRABAJADOR.branch_office_id = branch_offices.id
+            LEFT JOIN
+            users
+            ON 
+            branch_offices.principal_supervisor = users.rut
+        """
+
+        cursor.execute(query)
+
+        resultados = cursor.fetchall()
+
+        # Si no hay resultados, devuelve una lista vacía
+        if not resultados:
+            return {"columns": [], "data": []}
+
+        # Obtener los nombres de las columnas
+        columnas = [desc[0] for desc in cursor.description]
+
+        return {"columns": columnas, "data": resultados}
+
+    except Exception as e:
+        # Captura cualquier otro error durante la ejecución de la consulta
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+    finally:
+        if cnx:
+            close_connection(cnx)
+            
+
+
+            
+# 1. Modelos Pydantic para la carga de datos de la malla
+class MallaItem(BaseModel):
+    rut: str
+    fecha: date
+    codigo: str
+
+class MallaPayload(BaseModel):
+    year: int
+    month: int
+    ruts: List[str]  # Lista de todos los RUTs de la planilla que se está guardando
+    data: List[MallaItem]
+
+# 2. Endpoint para guardar la planificación
+@app.post("/guardar_malla", status_code=status.HTTP_201_CREATED)
+def guardar_malla(payload: MallaPayload):
+    """
+    Guarda o actualiza la malla de planificación para un conjunto de trabajadores
+    en un mes y año específicos.
+    
+    Lógica de operación:
+    1. Borra todos los registros existentes para los RUTs y el mes/año dados.
+    2. Inserta los nuevos registros de la planificación recibida.
+    """
+    cnx = get_connection('default')
+    if not cnx:
+        raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
+
+    cursor = create_cursor(cnx)
+
+    try:
+        # --- Lógica de Borrado ---
+        # Determinar el primer y último día del mes para el borrado
+        primer_dia = date(payload.year, payload.month, 1)
+        # Manera segura de encontrar el último día del mes
+        if payload.month == 12:
+            ultimo_dia = date(payload.year, 12, 31)
+        else:
+            ultimo_dia = date(payload.year, payload.month + 1, 1) - timedelta(days=1)
+
+        # La consulta de borrado debe ser parametrizada para seguridad
+        # El formato de placeholders %s puede variar según el conector de DB (ej. ? para otros)
+        # Creamos una cadena de placeholders para la lista de RUTs: (%s, %s, %s, ...)
+        ruts_placeholders = ', '.join(['%s'] * len(payload.ruts))
+        
+        delete_query = f"""
+            DELETE FROM ASISTENCIA_MALLA 
+            WHERE rut IN ({ruts_placeholders}) 
+            AND fecha BETWEEN %s AND %s
+        """
+        
+        # Los parámetros deben ser una tupla o lista plana
+        delete_params = tuple(payload.ruts) + (primer_dia, ultimo_dia)
+        
+        cursor.execute(delete_query, delete_params)
+        registros_borrados = cursor.rowcount
+
+        # --- Lógica de Inserción ---
+        if payload.data:
+            insert_query = """
+                INSERT INTO ASISTENCIA_MALLA (rut, fecha, codigo) 
+                VALUES (%s, %s, %s)
+            """
+            
+            # Crear una lista de tuplas para una inserción masiva y eficiente
+            datos_para_insertar = [
+                (item.rut, item.fecha, item.codigo) for item in payload.data
+            ]
+            
+            cursor.executemany(insert_query, datos_para_insertar)
+            registros_insertados = cursor.rowcount
+
+        # Si todo sale bien, confirmamos los cambios en la base de datos
+        cnx.commit()
+
+        return {
+            "success": True,
+            "message": f"Planificación guardada. Borrados: {registros_borrados}, Insertados: {registros_insertados}."
+        }
+
+    except Exception as e:
+        # Si algo falla, revertimos todos los cambios de esta transacción
+        cnx.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error en la operación de base de datos: {str(e)}"
+        )
+    finally:
+        # Siempre cerramos la conexión
+        close_connection(cnx)
+        
+# Cópialo y pégalo en tu archivo backend/main.py
+
+@app.get("/ventas_historicas_diarias")
+def get_ventas_historicas_diarias():
+    """
+    Obtiene el historial completo de ventas DIARIAS por sucursal,
+    calculado directamente desde la tabla de transacciones.
+    Este endpoint es la base para el modelo de proyección de ventas.
+    """
+    cnx = get_connection('default')
+    if cnx:
+        try:
+            cursor = create_cursor(cnx)
+            
+            # La consulta SQL que diseñamos, que es la correcta para tu estructura de datos.
+            # Se basa en tu tabla 'CABECERA_TRANSACCIONES' y 'sucursales' (a través de la vista QRY_BRANCH_OFFICES).
+            # Para mayor consistencia, usaremos QRY_BRANCH_OFFICES que ya usas en otros endpoints.
+            query = """
+                SELECT
+                    ct.date AS fecha,
+                    ct.branch_office_id,
+                    s.branch_office,
+                    SUM(ct.cash_amount + ct.card_amount) AS total_venta
+                FROM
+                    CABECERA_TRANSACCIONES ct
+                JOIN
+                    QRY_BRANCH_OFFICES s ON ct.branch_office_id = s.id -- Unimos con la vista QRY_BRANCH_OFFICES
+                WHERE
+                    s.status_id = 7 -- Aseguramos que solo sean sucursales activas
+                GROUP BY
+                    ct.date,
+                    ct.branch_office_id,
+                    s.branch_office
+                ORDER BY
+                    fecha,
+                    s.branch_office;
+            """
+            
+            cursor.execute(query)
+            
+            # Obtenemos los resultados y los nombres de las columnas, tal como lo haces en tus otros endpoints.
+            resultados = cursor.fetchall()
+            columnas = [desc[0] for desc in cursor.description]
+            
+            # Devolvemos el diccionario en el formato que espera el frontend (ventas.py y proyecciones.py).
+            return {"columns": columnas, "data": resultados}
+            
+        except Exception as e:
+            # Manejo de errores consistente con tu código existente.
+            raise HTTPException(status_code=500, detail=f"Error al consultar ventas históricas: {str(e)}")
+            
+        finally:
+            # Cerramos la conexión, como es tu práctica habitual.
+            close_connection(cnx)
+    else:
+        raise HTTPException(status_code=500, detail="Database connection error")
