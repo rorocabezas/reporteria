@@ -2,14 +2,22 @@
 from fastapi import FastAPI, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
-from backend.database import get_connection, close_connection, create_cursor
+from database import get_connection, close_connection, create_cursor
 import bcrypt
 from datetime import datetime, date, timedelta
-from typing import List
+from typing import List, Optional
+import sys
+import logging
+from pathlib import Path
 
+# Añadir el directorio raíz del proyecto al PYTHONPATH
+sys.path.append(str(Path(__file__).parent))
 
 app = FastAPI()
 security = HTTPBasic()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class UserLogin(BaseModel):
     rut: str
@@ -36,6 +44,79 @@ def login(user: UserLogin):
             close_connection(cnx)
     else:
         raise HTTPException(status_code=500, detail="Database connection error")
+    
+# En backend/main.py, añade este nuevo endpoint
+
+@app.get("/users/profile/{rut}")
+def get_user_profile(rut: str):
+    """
+    Obtiene el perfil completo de un usuario, incluyendo su rol
+    y las sucursales a las que tiene acceso.
+    """
+    cnx = get_connection('default')
+    if not cnx:
+        raise HTTPException(status_code=500, detail="Database connection error")
+
+    try:
+        cursor = create_cursor(cnx)
+        
+        # 1. Obtener información básica y el rol del usuario (con alias 'role')
+        user_query = """
+        SELECT 
+            a.rut, 
+            a.full_name, 
+            b.rol AS role  -- Usamos el alias para estandarizar
+        FROM users a
+        LEFT JOIN rols b ON a.rol_id = b.id 
+        WHERE a.rut = %s
+        """
+        cursor.execute(user_query, (rut,))
+        user_data = cursor.fetchone()
+
+        if not user_data:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+        # --- INICIO DE LA CORRECCIÓN CLAVE ---
+        
+        # 2. Obtener las sucursales asociadas
+        # Normalizamos el rol a minúsculas y sin espacios para una comparación segura.
+        # Esto evita errores si en la DB está guardado como " Administrador "
+        user_role_cleaned = user_data.get('role', '').strip().lower()
+
+        if user_role_cleaned == 'administrador':
+            # Si el rol es administrador, obtenemos TODAS las sucursales activas.
+            sucursales_query = """
+                SELECT id as branch_office_id, branch_office 
+                FROM QRY_BRANCH_OFFICES 
+                WHERE status_id = 7
+            """
+            cursor.execute(sucursales_query)
+        else:
+            # Para cualquier otro rol (Supervisor, Usuario de Oficina), obtenemos solo las sucursales asignadas.
+            sucursales_query = """
+                SELECT id as branch_office_id, branch_office 
+                FROM branch_offices 
+                WHERE principal_supervisor = %s AND status_id = 7
+            """
+            cursor.execute(sucursales_query, (rut,))
+            
+        # --- FIN DE LA CORRECCIÓN CLAVE ---
+
+        sucursales_data = cursor.fetchall()
+        
+        # Construimos el objeto de perfil completo
+        profile = {
+            "user_info": user_data,
+            "accessible_branches": sucursales_data
+        }
+        
+        return profile
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor en get_user_profile: {e}")
+    finally:
+        if cnx:
+            close_connection(cnx)
     
 @app.get("/api/usuarios/{usuario}")
 def get_usuario(usuario: str):
@@ -550,44 +631,168 @@ def get_ingresos_acum_ppto():
     
     
 # --- INICIO DEL NUEVO ENDPOINT PARA ASISTENCIA ---
-
 @app.get("/asistencia_diaria")
 def get_asistencia_diaria(
-    # Parámetros de consulta opcionales con valores por defecto al mes y año actual
     year: int = Query(default=datetime.now().year, description="Año para filtrar los datos de asistencia"),
-    month: int = Query(default=datetime.now().month, description="Mes para filtrar los datos de asistencia (1-12)")
+    month: int = Query(default=datetime.now().month, description="Mes para filtrar los datos de asistencia (1-12)"),
+    debug: bool = Query(default=False, description="Habilita información de debug")
 ):
     """
     Obtiene los registros de asistencia diaria para un mes y año específicos.
     Por defecto, devuelve los datos del mes y año actual.
     """
-    cnx = get_connection('default') 
+    cnx = get_connection('default')
     if not cnx:
         raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
 
     try:
         cursor = create_cursor(cnx)
-        
-        # Consulta SQL parametrizada para evitar inyección SQL y usar los parámetros
-        query = """
-        SELECT * FROM ASISTENCIA_DIARIA
-        WHERE YEAR(EntradaFecha) = %s AND MONTH(EntradaFecha) = %s
-        """
-        
+
+        # Consulta SQL parametrizada con información adicional para debug
+        if debug:
+            query = """
+            SELECT
+                *,
+                DATE(EntradaFecha) as fecha_entrada,
+                YEAR(EntradaFecha) as year_entrada,
+                MONTH(EntradaFecha) as month_entrada,
+                DAY(EntradaFecha) as day_entrada
+            FROM ASISTENCIA_DIARIA
+            WHERE YEAR(EntradaFecha) = %s AND MONTH(EntradaFecha) = %s
+            ORDER BY EntradaFecha DESC
+            """
+        else:
+            query = """
+            SELECT * FROM ASISTENCIA_DIARIA
+            WHERE YEAR(EntradaFecha) = %s AND MONTH(EntradaFecha) = %s
+            ORDER BY EntradaFecha DESC
+            """
+
         # Ejecutar la consulta con los parámetros
         cursor.execute(query, (year, month))
-        
         resultados = cursor.fetchall()
-        
-        # Si no hay resultados, no es un error, simplemente devuelve una lista vacía.
-        # El frontend se encargará de mostrar el mensaje adecuado.
-        
+
+        # Obtener información adicional para debug
+        if debug:
+            range_query = """
+            SELECT
+                MIN(EntradaFecha) as fecha_minima,
+                MAX(EntradaFecha) as fecha_maxima,
+                COUNT(*) as total_registros,
+                COUNT(DISTINCT DATE(EntradaFecha)) as dias_unicos
+            FROM ASISTENCIA_DIARIA
+            WHERE YEAR(EntradaFecha) = %s AND MONTH(EntradaFecha) = %s
+            """
+            cursor.execute(range_query, (year, month))
+            range_info = cursor.fetchone()
+
+            daily_count_query = """
+            SELECT
+                DATE(EntradaFecha) as fecha,
+                COUNT(*) as registros_por_dia
+            FROM ASISTENCIA_DIARIA
+            WHERE YEAR(EntradaFecha) = %s AND MONTH(EntradaFecha) = %s
+            GROUP BY DATE(EntradaFecha)
+            ORDER BY fecha DESC
+            """
+            cursor.execute(daily_count_query, (year, month))
+            daily_counts = cursor.fetchall()
+
         columnas = [desc[0] for desc in cursor.description]
-        
-        return {"columns": columnas, "data": resultados}
+
+        # Preparar la respuesta
+        response = {
+            "columns": columnas,
+            "data": resultados,
+            "total_records": len(resultados),
+            "query_params": {
+                "year": year,
+                "month": month,
+                "current_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        }
+
+        # Agregar información de debug si está habilitada
+        if debug:
+            response["debug_info"] = {
+                "range_info": range_info,
+                "daily_counts": daily_counts,
+                "query_executed": query
+            }
+
+        return response
 
     except Exception as e:
-        # Captura cualquier otro error durante la ejecución de la consulta
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+    finally:
+        if cnx:
+            close_connection(cnx)
+
+
+
+# Endpoint adicional para verificar los datos más recientes
+@app.get("/asistencia_diaria/verificar")
+def verificar_datos_asistencia():
+    """
+    Endpoint de verificación para revisar los datos más recientes de asistencia.
+    Útil para debugging y verificación de datos.
+    """
+    cnx = get_connection('default')
+    if not cnx:
+        raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
+
+    try:
+        cursor = create_cursor(cnx)
+
+        # Obtener información general de la tabla
+        info_query = """
+        SELECT 
+            COUNT(*) as total_registros,
+            MIN(EntradaFecha) as fecha_minima,
+            MAX(EntradaFecha) as fecha_maxima,
+            COUNT(DISTINCT DATE(EntradaFecha)) as dias_unicos,
+            COUNT(DISTINCT YEAR(EntradaFecha)) as años_unicos,
+            COUNT(DISTINCT MONTH(EntradaFecha)) as meses_unicos
+        FROM ASISTENCIA_DIARIA
+        """
+        cursor.execute(info_query)
+        info_general = cursor.fetchone()
+
+        # Obtener los últimos 10 registros
+        ultimos_query = """
+        SELECT * FROM ASISTENCIA_DIARIA
+        ORDER BY EntradaFecha DESC
+        LIMIT 10
+        """
+        cursor.execute(ultimos_query)
+        ultimos_registros = cursor.fetchall()
+        columnas_ultimos = [desc[0] for desc in cursor.description]
+
+        # Obtener conteo por día de los últimos 7 días
+        ultimos_dias_query = """
+        SELECT 
+            DATE(EntradaFecha) as fecha,
+            COUNT(*) as registros
+        FROM ASISTENCIA_DIARIA
+        WHERE EntradaFecha >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+        GROUP BY DATE(EntradaFecha)
+        ORDER BY fecha DESC
+        """
+        cursor.execute(ultimos_dias_query)
+        ultimos_dias = cursor.fetchall()
+
+        return {
+            "info_general": info_general,
+            "ultimos_registros": {
+                "columns": columnas_ultimos,
+                "data": ultimos_registros
+            },
+            "registros_ultimos_7_dias": ultimos_dias,
+            "timestamp_consulta": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
     finally:
@@ -721,99 +926,199 @@ def get_trabajadores():
             close_connection(cnx)
             
 
-
             
-# 1. Modelos Pydantic para la carga de datos de la malla
+# 1. Modelos Pydantic para la carga de datos de la malla    
 class MallaItem(BaseModel):
     rut: str
     fecha: date
     codigo: str
+    sucursal: str
 
 class MallaPayload(BaseModel):
     year: int
     month: int
-    ruts: List[str]  # Lista de todos los RUTs de la planilla que se está guardando
+    ruts: List[str]
     data: List[MallaItem]
 
-# 2. Endpoint para guardar la planificación
+
+
+class PlanificacionContext(BaseModel):
+    supervisor: str
+    sucursal: str
+    year: int
+    month: int
+    
+
 @app.post("/guardar_malla", status_code=status.HTTP_201_CREATED)
 def guardar_malla(payload: MallaPayload):
-    """
-    Guarda o actualiza la malla de planificación para un conjunto de trabajadores
-    en un mes y año específicos.
-    
-    Lógica de operación:
-    1. Borra todos los registros existentes para los RUTs y el mes/año dados.
-    2. Inserta los nuevos registros de la planificación recibida.
-    """
-    cnx = get_connection('default')
-    if not cnx:
-        raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
-
-    cursor = create_cursor(cnx)
-
+    cnx = None
     try:
-        # --- Lógica de Borrado ---
-        # Determinar el primer y último día del mes para el borrado
-        primer_dia = date(payload.year, payload.month, 1)
-        # Manera segura de encontrar el último día del mes
-        if payload.month == 12:
-            ultimo_dia = date(payload.year, 12, 31)
-        else:
-            ultimo_dia = date(payload.year, payload.month + 1, 1) - timedelta(days=1)
+        cnx = get_connection('default')
+        if not cnx:
+            raise HTTPException(status_code=500, detail="Error de conexión a la base de datos")
 
-        # La consulta de borrado debe ser parametrizada para seguridad
-        # El formato de placeholders %s puede variar según el conector de DB (ej. ? para otros)
-        # Creamos una cadena de placeholders para la lista de RUTs: (%s, %s, %s, ...)
-        ruts_placeholders = ', '.join(['%s'] * len(payload.ruts))
+        cursor = create_cursor(cnx)
+
+        # Convertir la lista de RUTs a una tupla adecuada
+        ruts_list = payload.ruts
+        if not ruts_list:
+            raise HTTPException(status_code=400, detail="Lista de RUTs vacía")
+            
+        # Crear marcadores de posición para la consulta SQL
+        placeholders = ','.join(['%s'] * len(ruts_list))
         
+        # Obtener sucursal (todos los items deben ser de la misma sucursal)
+        sucursal = payload.data[0].sucursal if payload.data else ""
+        
+        # Calcular rango de fechas
+        primer_dia = date(payload.year, payload.month, 1)
+        ultimo_dia = date(payload.year, payload.month + 1, 1) - timedelta(days=1) if payload.month < 12 else date(payload.year, 12, 31)
+
+        # 1. Borrar registros existentes (usando IN con parámetros)
         delete_query = f"""
-            DELETE FROM ASISTENCIA_MALLA 
-            WHERE rut IN ({ruts_placeholders}) 
-            AND fecha BETWEEN %s AND %s
+        DELETE FROM ASISTENCIA_MALLA
+        WHERE rut IN ({placeholders}) AND sucursal = %s AND fecha BETWEEN %s AND %s
         """
-        
-        # Los parámetros deben ser una tupla o lista plana
-        delete_params = tuple(payload.ruts) + (primer_dia, ultimo_dia)
-        
-        cursor.execute(delete_query, delete_params)
+        cursor.execute(delete_query, (*ruts_list, sucursal, primer_dia, ultimo_dia))
         registros_borrados = cursor.rowcount
 
-        # --- Lógica de Inserción ---
+        # 2. Insertar nuevos registros
         if payload.data:
             insert_query = """
-                INSERT INTO ASISTENCIA_MALLA (rut, fecha, codigo) 
-                VALUES (%s, %s, %s)
+            INSERT INTO ASISTENCIA_MALLA (rut, sucursal, fecha, codigo)
+            VALUES (%s, %s, %s, %s)
             """
-            
-            # Crear una lista de tuplas para una inserción masiva y eficiente
+            # Preparar datos para inserción masiva
             datos_para_insertar = [
-                (item.rut, item.fecha, item.codigo) for item in payload.data
+                (item.rut, item.sucursal, item.fecha, item.codigo)
+                for item in payload.data
             ]
-            
             cursor.executemany(insert_query, datos_para_insertar)
             registros_insertados = cursor.rowcount
 
-        # Si todo sale bien, confirmamos los cambios en la base de datos
         cnx.commit()
 
         return {
             "success": True,
-            "message": f"Planificación guardada. Borrados: {registros_borrados}, Insertados: {registros_insertados}."
+            "message": f"Planificación guardada. Borrados: {registros_borrados}, Insertados: {registros_insertados}.",
+            "sucursal": sucursal,
+            "year": payload.year,
+            "month": payload.month
         }
 
     except Exception as e:
-        # Si algo falla, revertimos todos los cambios de esta transacción
-        cnx.rollback()
+        if cnx:
+            cnx.rollback()
+        logger.error(f"Error al guardar malla: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error en la operación de base de datos: {str(e)}"
         )
     finally:
-        # Siempre cerramos la conexión
+        if cnx:
+            close_connection(cnx)
+
+
+@app.get("/check_planificacion")
+def check_planificacion(
+    sucursal: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...)
+):
+    """
+    Verifica si existe una planificación para la sucursal, año y mes dados.
+    """
+    try:
+        cnx = get_connection('default')
+        if not cnx:
+            logger.error("Error de conexión a la base de datos")
+            raise HTTPException(status_code=500, detail="Database connection error")
+
+        cursor = create_cursor(cnx)
+        query = """
+        SELECT COUNT(*) as count
+        FROM ASISTENCIA_MALLA
+        WHERE sucursal = %s AND YEAR(fecha) = %s AND MONTH(fecha) = %s
+        """
+        cursor.execute(query, (sucursal, year, month))
+        result = cursor.fetchone()
         close_connection(cnx)
-        
-# Cópialo y pégalo en tu archivo backend/main.py
+
+        exists = result['count'] > 0
+        return {"exists": exists}
+
+    except Exception as e:
+        logger.error(f"Error al verificar la planificación: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+@app.get("/load_planificacion")
+def load_planificacion(
+    sucursal: str = Query(...),
+    year: int = Query(...),
+    month: int = Query(...)
+):
+    """
+    Carga una planificación existente para la sucursal, año y mes dados.
+    """
+    try:
+        cnx = get_connection('default')
+        if not cnx:
+            raise HTTPException(status_code=500, detail="Database connection error")
+
+        cursor = create_cursor(cnx)
+        # Asegúrate de que la consulta SQL incluya el nombre del trabajador
+        query = """
+        SELECT m.rut, t.trabajador, m.fecha, m.codigo
+        FROM ASISTENCIA_MALLA m
+        JOIN ASISTENCIA_TRABAJADOR t ON m.rut = t.rut
+        WHERE m.sucursal = %s AND YEAR(m.fecha) = %s AND MONTH(m.fecha) = %s
+        """
+        cursor.execute(query, (sucursal, year, month))
+        resultados = cursor.fetchall()
+
+        if not resultados:
+            return {"data": []}
+
+        columnas = ['rut', 'trabajador', 'fecha', 'codigo']
+        return {"columns": columnas, "data": resultados}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+
+    finally:
+        if cnx:
+            close_connection(cnx)
+
+
+@app.get("/nombre_trabajador")
+def obtener_nombre_trabajador(rut: str = Query(...)):
+    """
+    Obtiene el nombre de un trabajador basado en su RUT.
+    """
+    try:
+        cnx = get_connection('default')
+        if not cnx:
+            logger.error("Error de conexión a la base de datos")
+            raise HTTPException(status_code=500, detail="Database connection error")
+
+        cursor = create_cursor(cnx)
+        query = """
+        SELECT trabajador
+        FROM ASISTENCIA_TRABAJADOR
+        WHERE rut = %s
+        """
+        cursor.execute(query, (rut,))
+        result = cursor.fetchone()
+        close_connection(cnx)
+
+        if result:
+            return {"nombre": result['trabajador']}
+        else:
+            raise HTTPException(status_code=404, detail="Trabajador no encontrado")
+
+    except Exception as e:
+        logger.error(f"Error al obtener el nombre del trabajador: {e}")
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @app.get("/ventas_historicas_diarias")
 def get_ventas_historicas_diarias():

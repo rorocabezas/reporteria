@@ -1,31 +1,28 @@
 # backend/database.py
+import os
+from dotenv import load_dotenv
 import mysql.connector
 from mysql.connector import Error
 
-# Configuración de la conexión a la base de datos
-configs = {
-    'default': {
-        'host': '192.250.226.219',
-        'user': 'admin',
-        'password': 'Chile2025',
-        'database': 'jisparking'
-    },
-    'nuevo': {
-        'host': 'erpjis.mysql.database.azure.com',
-        'user': 'erpjis@erpjis',
-        'password': 'Macana11',
-        'database': 'erp_jis'
-    }
+# Cargar las variables de entorno desde el archivo .env en la misma ruta
+load_dotenv()
+
+# Configurar el diccionario de la base de datos
+db_config = {
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_DATABASE')
 }
+
+# Validación crucial para evitar errores posteriores
+if not all(db_config.values()):
+    raise ValueError("Error Crítico: Una o más variables de la base de datos no están definidas en el archivo .env.")
 
 def get_connection(config_key='default'):
     """Obtiene una conexión a la base de datos."""
-    config = configs.get(config_key)
-    if not config:
-        raise ValueError(f"Configuración no encontrada para la clave: {config_key}")
-
     try:
-        cnx = mysql.connector.connect(**config)
+        cnx = mysql.connector.connect(**db_config) 
         return cnx
     except Error as err:
         print(f"Error al conectar a la base de datos: {err}")
@@ -34,7 +31,8 @@ def get_connection(config_key='default'):
 def close_connection(cnx):
     """Cierra una conexión a la base de datos."""
     try:
-        cnx.close()
+        if cnx.is_connected():
+            cnx.close()
     except Error as err:
         print(f"Error al cerrar la conexión: {err}")
 
